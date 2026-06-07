@@ -129,6 +129,46 @@ results = bot.monitor(["BTCUSDT", "SOLUSDT", "DOGEUSDT"])
 | EMA (Exponential Moving Average) | 12, 26 periods | Like SMA but weights recent prices more |
 | RSI (Relative Strength Index) | 14 periods | Momentum — >70 overbought, <30 oversold |
 | MACD | 12/26/9 | Trend strength — >0 bullish, <0 bearish |
+| **Bollinger Bands** | 20 periods, 2σ | Volatility — price near upper=overbought, near lower=oversold |
+| **ATR** | 14 periods | Market volatility measurement |
+
+### Backtesting (New in v2.3)
+
+Test trading strategies on historical data before risking real money:
+
+```bash
+# SMA crossover strategy (default)
+python crypto_bot.py --backtest BTCUSDT --interval 1d --capital 10000
+
+# RSI extreme strategy
+python crypto_bot.py --backtest ETHUSDT --strategy rsi_extreme
+
+# MACD signal strategy
+python crypto_bot.py --backtest SOLUSDT --strategy macd_signal --capital 5000
+```
+
+**Output:**
+```
+  CryptoPriceBot Backtest Report
+  ──────────────────────────────────────────────────
+  Symbol:          BTCUSDT
+  Strategy:        sma_cross
+  Initial Capital: $10,000.00
+  Final Capital:   $12,450.32
+  Total Return:    +24.50%
+  Total Trades:    15
+  Win Rate:        60.0%
+  Max Drawdown:    -8.32%
+  ──────────────────────────────────────────────────
+  Recent Trades:
+    ✅ Entry: $42,150.00  Exit: $43,800.00  PnL:  +3.92%
+    ❌ Entry: $43,800.00  Exit: $42,500.00  PnL:  -2.97%
+```
+
+**Available Strategies:**
+- `sma_cross` — Buy when SMA20 crosses above SMA50
+- `rsi_extreme` — Buy at RSI<30, sell at RSI>70
+- `macd_signal` — Buy when MACD turns positive
 
 ---
 
@@ -164,8 +204,14 @@ python crypto_bot.py --json              # JSON 格式输出
 ```python
 from crypto_bot import CryptoBot
 bot = CryptoBot(proxy="http://127.0.0.1:10793")
+
+# 实时分析
 r = bot.analyze("BTCUSDT", interval="1h")
 print(f"价格: ${r['price']:,.2f}, RSI: {r['rsi']}, 信号: {', '.join(r['signals'])}")
+
+# 策略回测
+bt = bot.backtest("BTCUSDT", interval="1d", strategy="sma_cross", capital=10000)
+print(f"收益率: {bt['total_return_pct']:+.2f}%, 胜率: {bt['win_rate_pct']:.1f}%")
 ```
 
 ### 支持的交易对
