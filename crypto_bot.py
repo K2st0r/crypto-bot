@@ -216,6 +216,158 @@ class CryptoBot:
         return results
 
 
+    # ── Bollinger Bands ────────────────────────────
+    @staticmethod
+    def bollinger_bands(data: List[float], period: int = 20, std_dev: int = 2):
+        """Return (upper_band, middle_band, lower_band)."""
+        if len(data) < period:
+            return None, None, None
+        sma_val = CryptoBot.sma(data, period)
+        recent = data[-period:]
+        mean = sum(recent) / period
+        variance = sum((x - mean) ** 2 for x in recent) / period
+        stdev = variance ** 0.5
+        return (
+            round(sma_val + std_dev * stdev, 2),
+            round(sma_val, 2),
+            round(sma_val - std_dev * stdev, 2),
+        )
+
+    # ── ATR (Average True Range) ────────────────────
+    @staticmethod
+    def atr_from_klines(klines: List[List], period: int = 14) -> Optional[float]:
+        """Calculate ATR from kline data (each row: [time, open, high, low, close, ...])."""
+        if len(klines) < period + 1:
+            return None
+        trs = []
+        for i in range(1, len(klines)):
+            h, l, prev_c = float(klines[i][2]), float(klines[i][3]), float(klines[i - 1][4])
+            tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+            trs.append(tr)
+        return round(sum(trs[-period:]) / period, 4)
+
+    # ── Backtesting Engine ──────────────────────────
+    def backtest(self, symbol: str = "BTCUSDT", interval: str = "1h",
+                 strategy: str = "sma_cross", capital: float = 10000,
+                 lookback_days: int = 90) -> Dict:
+        """
+        Backtest a trading strategy on historical data.
+
+        Strategies:
+          - "sma_cross": Buy when SMA20 crosses above SMA50, sell when crosses below.
+          - "rsi_extreme": Buy when RSI < 30 (oversold), sell when RSI > 70 (overbought).
+          - "macd_signal": Buy when MACD turns positive, sell when negative.
+
+        Returns dict with total_return, win_rate, max_drawdown, trades, final_capital.
+        """
+        # Fetch enough candles (capped to avoid memory issues)
+        limit = min(500, max(100, lookback_days * 2))
+        klines = self.get_klines(symbol, interval, limit=limit)
+        closes = [float(k[4]) for k in klines]
+
+        trades = []
+        position = None  # None = flat, 'long'
+        entry_price = 0.0
+        cash = capital
+        equity_curve = [capital]
+
+        for i in range(51, len(closes)):  # need 50 candles for SMA50
+            window = closes[:i + 1]
+            price = closes[i]
+
+            # Compute indicators
+            sma20 = self.sma(window, 20)
+            sma50 = self.sma(window, 50)
+            rsi_val = self.rsi(window)
+            ema12 = self.ema(window, 12)
+            ema26 = self.ema(window, 26)
+
+            signal = None  # 'buy', 'sell', or None
+
+            if strategy == "sma_cross":
+                if sma20 and sma50:
+                    prev20 = self.sma(closes[:i], 20)
+                    prev50 = self.sma(closes[:i], 50)
+                    if prev20 and prev50:
+                        if prev20 <= prev50 and sma20 > sma50:
+                            signal = 'buy'
+                        elif prev20 >= prev50 and sma20 < sma50:
+                            signal = 'sell'
+
+            elif strategy == "rsi_extreme":
+                if rsi_val:
+                    if rsi_val < 30:
+                        signal = 'buy'
+                    elif rsi_val > 70:
+                        signal = 'sell'
+
+            elif strategy == "macd_signal":
+                if ema12 and ema26:
+                    prev_macd = self.ema(closes[:i], 12) - self.ema(closes[:i], 26)
+                    cur_macd = ema12 - ema26
+                    if prev_macd and cur_macd:
+                        if prev_macd <= 0 and cur_macd > 0:
+                            signal = 'buy'
+                        elif prev_macd >= 0 and cur_macd < 0:
+                            signal = 'sell'
+
+            # Execute trades
+            if signal == 'buy' and position is None:
+                entry_price = price
+                position = 'long'
+            elif signal == 'sell' and position == 'long':
+                pnl = (price - entry_price) / entry_price
+                trades.append({
+                    'entry': round(entry_price, 2),
+                    'exit': round(price, 2),
+                    'pnl_pct': round(pnl * 100, 2),
+                    'bars_held': i - next(j for j, t in enumerate(trades[::-1]) if True) if trades else i,
+                })
+                cash *= (1 + pnl)
+                position = None
+
+            # Track equity
+            if position == 'long':
+                equity = cash * (price / entry_price)
+            else:
+                equity = cash
+            equity_curve.append(equity)
+
+        # Close remaining position at last price
+        if position == 'long':
+            pnl = (closes[-1] - entry_price) / entry_price
+            trades.append({'entry': round(entry_price, 2), 'exit': round(closes[-1], 2), 'pnl_pct': round(pnl * 100, 2)})
+            cash *= (1 + pnl)
+
+        # Calculate stats
+        wins = [t for t in trades if t['pnl_pct'] > 0]
+        win_rate = len(wins) / len(trades) * 100 if trades else 0
+        total_return = (cash - capital) / capital * 100
+
+        # Max drawdown
+        peak = equity_curve[0]
+        max_dd = 0.0
+        for eq in equity_curve:
+            if eq > peak:
+                peak = eq
+            dd = (peak - eq) / peak * 100
+            if dd > max_dd:
+                max_dd = dd
+
+        return {
+            "symbol": symbol.upper(),
+            "strategy": strategy,
+            "interval": interval,
+            "initial_capital": capital,
+            "final_capital": round(cash, 2),
+            "total_return_pct": round(total_return, 2),
+            "total_trades": len(trades),
+            "win_rate_pct": round(win_rate, 1),
+            "max_drawdown_pct": round(max_dd, 2),
+            "trades": trades[-10:],  # last 10 trades
+        }
+
+
 # ─── CLI Interface (参考 yt-dlp 风格) ──────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -231,6 +383,8 @@ Examples:
   crypto_bot.py --interval 4h             # 4-hour candles
   crypto_bot.py --24hr                    # Show 24hr stats
   crypto_bot.py --proxy http://127.0.0.1:10793  # Via proxy
+  crypto_bot.py --backtest BTCUSDT        # Backtest strategies
+  crypto_bot.py --backtest ETHUSDT --strategy rsi_extreme
   crypto_bot.py --list-intervals          # List all intervals
         """
     )
@@ -244,6 +398,13 @@ Examples:
                    help="HTTP proxy URL")
     p.add_argument("-j", "--json", action="store_true",
                    help="Output as JSON")
+    p.add_argument("--backtest", metavar="SYMBOL",
+                   help="Run strategy backtest on SYMBOL")
+    p.add_argument("--strategy", default="sma_cross",
+                   choices=["sma_cross", "rsi_extreme", "macd_signal"],
+                   help="Backtest strategy (default: sma_cross)")
+    p.add_argument("--capital", type=float, default=10000,
+                   help="Initial capital for backtest (default: 10000)")
     p.add_argument("--list-intervals", action="store_true",
                    help="List valid kline intervals and exit")
     p.add_argument("--version", action="version",
@@ -260,6 +421,30 @@ def main() -> None:
         return
 
     bot = CryptoBot(proxy=args.proxy)
+
+    if args.backtest:
+        bt = bot.backtest(args.backtest, interval=args.interval,
+                         strategy=args.strategy, capital=args.capital)
+        print(f"""
+  CryptoPriceBot Backtest Report
+  {'─' * 50}
+  Symbol:          {bt['symbol']}
+  Strategy:        {bt['strategy']}
+  Interval:        {bt['interval']}
+  Initial Capital: {bt['initial_capital']:,.2f}
+  Final Capital:   {bt['final_capital']:,.2f}
+  Total Return:    {bt['total_return_pct']:+.2f}%
+  Total Trades:    {bt['total_trades']}
+  Win Rate:        {bt['win_rate_pct']:.1f}%
+  Max Drawdown:    -{bt['max_drawdown_pct']:.2f}%
+  {'─' * 50}
+  Recent Trades (last 10):""")
+        for t in bt['trades']:
+            icon = '✅' if t['pnl_pct'] > 0 else '❌'
+            print(f"    {icon} Entry: {t['entry']:>10,.2f}  Exit: {t['exit']:>10,.2f}  PnL: {t['pnl_pct']:>+7.2f}%")
+        print(f"  {'─' * 50}\n")
+        return
+
     symbols = args.symbols or ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
 
     if args.json:
