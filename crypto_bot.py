@@ -17,10 +17,11 @@ import argparse
 import json
 import sys
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -50,19 +51,27 @@ class CryptoBot:
 
     def __init__(self, proxy: Optional[str] = None) -> None:
         self._base = "https://api.binance.com"
-        self._opener: Optional[urllib.request.OpenerDirector] = None
+        self._session = requests.Session()
+        
+        # Retry strategy
+        retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retry)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
+        
+        # Proxy
         if proxy:
-            handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-            self._opener = urllib.request.build_opener(handler)
+            self._session.proxies = {"http": proxy, "https": proxy}
+        
+        self._session.headers.update({"User-Agent": "CryptoPriceBot/2.1"})
 
     # ── HTTP helpers ───────────────────────────────────
 
     def _fetch(self, url: str) -> Any:
         """Fetch JSON from Binance API."""
-        opener = self._opener or urllib.request.build_opener()
-        req = urllib.request.Request(url, headers={"User-Agent": "CryptoPriceBot/2.1"})
-        with opener.open(req, timeout=15) as resp:
-            return json.loads(resp.read())
+        resp = self._session.get(url, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
 
     # ── Data methods ───────────────────────────────────
 
